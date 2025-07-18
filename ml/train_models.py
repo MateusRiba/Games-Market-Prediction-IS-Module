@@ -109,7 +109,8 @@ def train_and_save(target_col: str, outfile: Path) -> None:
     # ● Avalia
     pred = model.predict(X_val)
     mae  = mean_absolute_error(y_val, pred)
-    print(f"🔸 {target_col:<12} → MAE: {mae:,.3f}")
+    print(f"{target_col:<12} -> MAE: {mae:,.3f}")
+
 
     # ● Salva .pkl
     joblib.dump(model, Path("ml") / outfile)
@@ -119,9 +120,9 @@ def train_and_save(target_col: str, outfile: Path) -> None:
 for target, filename in TARGETS.items():
     # Algumas linhas podem ter NaN no alvo específico; removemos
     if df[target].isna().all():
-        print(f"⚠️  {target} só tem NaNs — pulando.")
+        print(f"{target} só tem NaNs — pulando.")
         continue
     train_and_save(target, filename)
 
 
-print("🏁  Treino completo; modelos salvos em ml/*.pkl")
+print("Treino completo; modelos salvos em ml/*.pkl")
