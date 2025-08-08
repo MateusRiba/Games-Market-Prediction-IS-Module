@@ -36,5 +36,5 @@ class Game(Base):
     metascore = Column(Float)     # nota crítica média
     userscore = Column(Float)     # nota de usuários média
 
-    # 7) (Opcional) Coluna de data original, se quiser manter
+    # 7)  Coluna de data original
     releaseDate = Column(DateTime)  # data completa de lançamento

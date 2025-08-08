@@ -1,0 +1,29 @@
+# --- Core data stack ---
+pandas==2.2.2
+numpy==1.26.4
+scipy==1.13.1
+
+# --- Machine Learning (treino e inferência) ---
+scikit-learn==1.5.2
+joblib==1.4.2
+
+# --- Banco de dados ---
+SQLAlchemy==2.0.31
+
+# --- API (backend) ---
+fastapi==0.111.0
+uvicorn[standard]==0.30.0
+pydantic==2.7.4
+aiosqlite==0.20.0
+
+
+# --- Frontend (Streamlit + gráficos) ---
+streamlit==1.33.0
+plotly==5.22.0
+
+# --- ETL / utilidades ---
+python-slugify==8.0.4
+rapidfuzz==3.9.1
+
+# --- Compatibilidade (às vezes exigido por libs no Windows) ---
+typing_extensions==4.12.2
