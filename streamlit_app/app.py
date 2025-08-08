@@ -1,3 +1,5 @@
+#streamlit_app/app.py
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -65,6 +67,94 @@ def predict(model, df_row):
 ELASTICITY = 1.2            # |ε| preço–demanda
 BASE_PRICE = 60
 
+def reconcile_global(preds: dict) -> dict:
+    """Se Global < soma regionais, substitui Global pela soma (consistência)."""
+    def _safe(v):
+        try:
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                return 0.0
+            return float(v)
+        except Exception:
+            return 0.0
+
+    reg_sum = (
+        _safe(preds.get("NA Sales")) +
+        _safe(preds.get("PAL Sales")) +
+        _safe(preds.get("JP Sales")) +
+        _safe(preds.get("Other Sales"))
+    )
+    if "Global Sales" in preds and _safe(preds.get("Global Sales")) < reg_sum:
+        preds["Global Sales"] = reg_sum
+    return preds
+
+
+def sales_percentile(sales: float, df: pd.DataFrame) -> float:
+    """Percentil (0-100) da venda prevista comparada ao histórico do dataset."""
+    arr = df["global_sales"].dropna().to_numpy()
+    if arr.size == 0:
+        return 50.0
+    sales = max(0.0, float(sales))
+    pct = (arr <= sales).sum() / arr.size * 100.0
+    return float(np.clip(pct, 1, 99))
+
+
+def success_from_ms_and_sales(ms: float, sales: float, df: pd.DataFrame, w_ms: float = 0.65):
+    """
+    Combina Metascore e percentil de vendas para estimar chance de sucesso.
+    - Metascore -> curva logística (centrada ~70) com piso 25% e teto 99%.
+    - Vendas -> percentil histórico (0-100).
+    - Peso padrão: 65% metascore, 35% vendas (ajuste em w_ms).
+    """
+    # componente metascore (S-curve)
+    raw = 1.0 / (1.0 + np.exp(-0.3 * (ms - 70)))
+    succ_ms = 100.0 * (0.25 + 0.75 * raw)          # ~60 → ~35-40%, 75 → ~86%, 90 → ~96%
+    succ_ms = float(np.clip(succ_ms, 5, 99))
+
+    # componente vendas (percentil)
+    succ_sales = sales_percentile(sales, df)        # 0..100
+
+    # blend ponderado
+    w_sales = 1.0 - w_ms
+    success = w_ms * succ_ms + w_sales * succ_sales
+    success = float(np.clip(success, 1, 99))
+    risk = 100.0 - success
+    return success, risk, succ_ms, succ_sales
+
+
+def _weighted_choice(series: pd.Series):
+    """Escolhe 1 valor ponderado pela frequência observada no dataset."""
+    vc = series.dropna().value_counts(normalize=True)
+    return np.random.choice(vc.index, p=vc.values)
+
+def sample_random_game(df: pd.DataFrame):
+    """Gera um 'jogo' plausível com base nas distribuições do dataset."""
+    rating    = _weighted_choice(df["rating"])
+    platform  = _weighted_choice(df["platform"])
+    dev       = _weighted_choice(df["developer"])
+    pub       = _weighted_choice(df["publisher"])
+    year      = int(_weighted_choice(df["year"]))
+
+    # gêneros: 1 ou 2, ponderado por frequência
+    vc_gen = df["genres"].dropna().value_counts(normalize=True)
+    k = np.random.choice([1, 2], p=[0.6, 0.4])
+    genres = list(np.random.choice(vc_gen.index, size=k, replace=False, p=vc_gen.values))
+
+    # preço ~ triangular (pico em 60), marketing nível ponderado
+    price = int(round(np.random.triangular(1, 60, 100)))
+    marketing_level = np.random.choice(["Baixo", "Médio", "Alto"], p=[0.4, 0.4, 0.2])
+
+    return {
+        "rating": rating,
+        "platform": platform,
+        "developer": dev,
+        "publisher": pub,
+        "year": year,
+        "genres": genres,
+        "price": price,
+        "marketing_level": marketing_level,
+    }
+
+
 def price_factor(price):
     ratio = price / BASE_PRICE
     f = ratio ** (-ELASTICITY)
@@ -76,10 +166,12 @@ marketing_factor_map = {
     "Alto"  : 1.50,   # +50 %
 }
 
-def score_to_success(ms):
-    """Converte metascore → chance de sucesso (%) e risco (%)"""
-    success = np.clip((ms - 50) * 2, 0, 95)  # 50 →0 %, 95→90-95 %
-    risk    = 100 - success
+def score_to_success(ms, center=70, steepness=0.18, min_s=35, max_s=98):
+    ms = float(np.clip(ms, 0, 100))
+    sigma = 1.0 / (1.0 + np.exp(-steepness * (ms - center)))
+    success = min_s + (max_s - min_s) * sigma
+    success = float(np.clip(success, 0, 100))
+    risk = float(100 - success)
     return success, risk
 
 #   Streamlit 
@@ -135,17 +227,20 @@ def predictions_page(df, models):
     st.header("Previsões de Vendas")
     st.markdown("Configure as características do jogo e **simule cenários**:")
 
-    # 🎯  Parâmetros de cenário (fora do form, pois afetam só pós-previsão)
-    price            = st.slider("Preço de Venda (USD)", 1, 100, 60)
-    marketing_level  = st.selectbox("Nível de Investimento em Marketing",
-                                    ["Baixo", "Médio", "Alto"])
+    # Parâmetros do cenário (pós-modelo)
+    price           = st.slider("Preço de Venda (USD)", 1, 100, 60)
+    marketing_level = st.selectbox("Nível de Investimento em Marketing", ["Baixo", "Médio", "Alto"])
+
+    # 🔀 Randomizar
+    rand_col1, rand_col2 = st.columns([1, 3])
+    with rand_col1:
+        do_random = st.button("🔀 Randomizar e Prever")
 
     with st.form("input_form"):
         c1, c2 = st.columns(2)
         with c1:
             rating   = st.selectbox("Rating ESRB", sorted(df['rating'].dropna().unique()))
             platform = st.selectbox("Plataforma", sorted(df['platform'].dropna().unique()))
-            # até 2 gêneros
             genres   = st.multiselect("Gêneros (máx. 2)", sorted(df['genres'].dropna().unique()),
                                       max_selections=2)
             if not genres:
@@ -155,72 +250,106 @@ def predictions_page(df, models):
             publisher = st.selectbox("Publisher", sorted(df['publisher'].dropna().unique()))
             year      = st.slider("Ano", int(df['year'].min()), int(df['year'].max()),
                                   int(df['year'].median()))
+
         submitted = st.form_submit_button("Fazer Previsões")
 
-    if not submitted:
+    def run_prediction(_rating, _platform, _genres, _developer, _publisher, _year, _price, _marketing_level):
+        # ----- features
+        feat = pd.DataFrame([{
+            "rating": _rating,
+            "platform": _platform,
+            "genres": "|".join(_genres),
+            "developer": _developer,
+            "publisher": _publisher,
+            "year": _year
+        }])
+
+        # ----- previsões “cruas”
+        preds = {name: predict(m, feat) for name, m in models.items()}
+        preds = reconcile_global(preds)
+        original_sales = preds.get("Global Sales", 0.0)
+
+        # ----- aplica fatores de preço + marketing
+        pf = price_factor(_price)
+        mf = marketing_factor_map[_marketing_level]
+        for k in preds:
+            if "Sales" in k:
+                preds[k] *= pf * mf
+
+        preds = reconcile_global(preds)
+
+        metascore_pred = preds.get("Metascore", np.nan)
+        global_pred    = preds.get("Global Sales", 0.0)
+
+        success_perc, risk_perc, succ_ms_comp, succ_sales_comp = success_from_ms_and_sales(
+            metascore_pred if not np.isnan(metascore_pred) else 50.0,
+            global_pred,
+            df,
+            w_ms=0.5  # ajuste é possivel para o peso do metascore 
+)
+
+        # ---------- Exibição ----------
+        st.subheader("Parâmetros usados")
+        st.write({
+            "rating": _rating, "platform": _platform, "genres": _genres,
+            "developer": _developer, "publisher": _publisher, "year": _year,
+            "preço(USD)": _price, "marketing": _marketing_level
+        })
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("Vendas Previstas (Milhões)")
+            for k, v in preds.items():
+                if "Sales" in k:
+                    st.metric(k, f"{v:.2f} M")
+
+            fig = go.Figure([
+                go.Bar(name="Original", x=["Global"], y=[original_sales]),
+                go.Bar(name="C/ Cenário", x=["Global"], y=[preds.get("Global Sales", 0)])
+            ])
+            fig.update_layout(barmode="group", title="Impacto de Preço + Marketing")
+            st.plotly_chart(fig, use_container_width=True)
+
+        with c2:
+            st.subheader("Qualidade & Risco")
+            if not np.isnan(metascore_pred):
+                st.metric("Metascore Previsto", f"{metascore_pred:.1f}")
+            else:
+                st.metric("Metascore Previsto", "—")
+
+            st.text("Chance de Sucesso Comercial")
+            st.progress(int(success_perc))
+            st.text(f"{success_perc:.1f}%")
+
+            st.text("Risco de Falha")
+            st.progress(int(risk_perc))
+            st.text(f"{risk_perc:.1f}%")
+
+            st.caption(f"Contribuições — Qualidade: {succ_ms_comp:.1f}% · Vendas (percentil): {succ_sales_comp:.1f}%")
+
+        st.subheader("Distribuição Regional de Vendas")
+        pie = px.pie(
+            names=["NA", "PAL", "JP", "Other"],
+            values=[preds.get('NA Sales',0), preds.get('PAL Sales',0),
+                    preds.get('JP Sales',0), preds.get('Other Sales',0)],
+            title="Vendas por Região"
+        )
+        st.plotly_chart(pie, use_container_width=True)
+
+    # 1) Caminho do botão “Randomizar e Prever”
+    if do_random:
+        params = sample_random_game(df)
+        run_prediction(
+            params["rating"], params["platform"], params["genres"],
+            params["developer"], params["publisher"], params["year"],
+            params["price"], params["marketing_level"]
+        )
         return
 
-    # ----- prepara linha de features
-    feat = pd.DataFrame([{
-        "rating": rating,
-        "platform": platform,
-        "genres": "|".join(genres),           # concatenação para o modelo
-        "developer": developer,
-        "publisher": publisher,
-        "year": year
-    }])
+    # 2) Caminho do submit normal
+    if submitted and genres:
+        run_prediction(rating, platform, genres, developer, publisher, year, price, marketing_level)
 
-    # ----- obtém previsões cruas
-    preds = {name: predict(m, feat) for name, m in models.items()}
-    original_sales = preds.get("Global Sales", 0)
-
-    # ----- aplica fatores de cenário
-    pf = price_factor(price)
-    mf = marketing_factor_map[marketing_level]
-    for k in preds:
-        if "Sales" in k:
-            preds[k] *= pf * mf
-
-    metascore_pred = preds["Metascore"]
-    success_perc, risk_perc = score_to_success(metascore_pred)
-
-    # ========== exibição ==========
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Vendas Previstas (Milhões)")
-        for k, v in preds.items():
-            if "Sales" in k:
-                st.metric(k, f"{v:.2f} M")
-
-        # comparação gráfico
-        fig = go.Figure([
-            go.Bar(name="Original", x=["Global"], y=[original_sales]),
-            go.Bar(name="C/ Cenário", x=["Global"], y=[preds["Global Sales"]])
-        ])
-        fig.update_layout(barmode="group", title="Impacto de Preço + Marketing")
-        st.plotly_chart(fig, use_container_width=True)
-
-    with c2:
-        st.subheader("Qualidade & Risco")
-        st.metric("Metascore Previsto", f"{metascore_pred:.1f}")
-
-        st.text("Chance de Sucesso Comercial")
-        st.progress(int(success_perc))
-        st.text(f"{success_perc:.1f}%")
-
-        st.text("Risco de Falha")
-        st.progress(int(risk_perc))
-        st.text(f"{risk_perc:.1f}%")
-
-    # gráfico pizza regional
-    st.subheader("Distribuição Regional de Vendas")
-    pie = px.pie(
-        names=["NA", "PAL", "JP", "Other"],
-        values=[preds.get('NA Sales',0), preds.get('PAL Sales',0),
-                preds.get('JP Sales',0), preds.get('Other Sales',0)],
-        title="Vendas por Região"
-    )
-    st.plotly_chart(pie, use_container_width=True)
 
 # ---------- ANALYSIS ---------------------------------------------------------
 def analysis_page(df):

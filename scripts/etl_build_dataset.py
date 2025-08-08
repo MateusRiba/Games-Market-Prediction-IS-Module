@@ -1,4 +1,5 @@
-#ETL para gerar data/processed/games.db e parquet de backup
+#ETL para gerar data/processed/games.db 
+#ETL_build_dataset.py
 #Tratamento de dados.
 
 import pandas as pd

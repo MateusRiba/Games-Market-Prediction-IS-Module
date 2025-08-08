@@ -1,8 +1,8 @@
+#Train_models.py
 
 #Aqui será realizado o treino em Random Forest (um por alvo) usando
 #os dados já limpos de games.db.
 
-#Precisa do venv ativo para rodar (.\.venv\Scripts\Activate):
 #python ml/train_models.py
 
 #Isso gera os seguintes arquivos em ml/:
@@ -119,9 +119,9 @@ def train_and_save(target_col: str, outfile: Path) -> None:
 for target, filename in TARGETS.items():
     # Algumas linhas podem ter NaN no alvo específico; removemos
     if df[target].isna().all():
-        print(f"⚠️  {target} só tem NaNs — pulando.")
+        print(f"  {target} só tem NaNs — pulando.")
         continue
     train_and_save(target, filename)
 
 
-print("🏁  Treino completo; modelos salvos em ml/*.pkl")
+print("Treino completo; modelos salvos em ml/*.pkl")
